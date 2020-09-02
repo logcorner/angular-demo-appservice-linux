@@ -1,0 +1,126 @@
+using System.Threading.Tasks;
+
+namespace HubShared
+{
+    public class FooData
+    {
+        public string FooPayload { get; set; }
+    }
+
+    public class BarData
+    {
+        public double Number { get; set; }
+        public double Cost { get; set; }
+    }
+
+    public class BarResult
+    {
+        public string Id { get; set; }
+    }
+
+    /// <summary> SignalR Hub push interface (signature for Hub pushing notifications to Clients) </summary>
+    public interface IHubPushMethods
+    {
+        Task OnFoo(FooData fodData);
+        Task OnBar(string id, BarData barData);
+    }
+
+    /// <summary> SignalR Hub invoke interface (signature for Clients invoking methods on server Hub) </summary>
+    public interface IHubInvokeMethods
+    {
+        Task InvokeFoo(string payload);
+        Task<BarResult> InvokeBar(double number, double cost);
+    }
+}
+
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.SignalR;
+using HubShared;
+
+namespace ServerHub
+{
+    public class MyHub : Hub<IHubPushMethods>, IHubInvokeMethods
+    {
+        public async Task InvokeFoo(string payload)
+        {
+            var foo = new FooData { FooPayload = payload };
+            await Clients.All.OnFoo(foo);
+        }
+
+        public async Task<BarResult> InvokeBar(double number, double cost)
+        {
+            var bar = new BarData { Number = number, Cost = cost };
+            await Clients.All.OnBar(Context.UserIdentifier, bar);
+
+            return new BarResult { Id = "Some Id" };
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq.Expressions;
+using System.Net;
+using System.Reflection;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.SignalR.Client;
+using HubShared;
+
+namespace HubClient
+{
+    public class ConnectionFactoryHelper
+    {
+        public static HubConnection CreateConnection(Uri url, ICollection<Cookie> cookies)
+            => new HubConnectionBuilder()
+                .WithUrl(url, options =>
+                {
+                    foreach (var cookie in cookies)
+                    {
+                        options.Cookies.Add(cookie);
+                    }
+                })
+                .Build();
+    }
+
+    public class ConnectionMethodsWrapper : IHubInvokeMethods
+    {
+        private readonly HubConnection _connection;
+
+        public ConnectionMethodsWrapper(HubConnection connection)
+            => _connection = connection;
+
+        public Task InvokeFoo(string payload)
+            => _connection.InvokeAsync(nameof(IHubPushMethods.InvokeFoo), payload);
+
+        public Task<BarResult> InvokeBar(double number, double cost)
+            => _connection.InvokeAsync<BarResult>(nameof(IHubPushMethods.InvokeBar), number, cost);
+
+        public IDisposable RegisterOnFoo(Action<FooData> onFoo)
+            => _connection.BindOnInterface(x => x.OnFoo, onFoo);
+
+        public IDisposable RegisterOnBar(Action<string, BarData> onBar)
+            => _connection.BindOnInterface(x => x.OnBar, onBar);
+    }
+
+    /// <summary> Extension class enables Client code to bind onto the method names and parameters on <see cref="IHubPushMethods"/> with a guarantee of correct method names. </summary>
+    public static class HubConnectionBindExtensions
+    {
+        public static IDisposable BindOnInterface<T>(this HubConnection connection, Expression<Func<IHubPushMethods, Func<T, Task>>> boundMethod, Action<T> handler)
+            => connection.On<T>(_GetMethodName(boundMethod), handler);
+
+        public static IDisposable BindOnInterface<T1, T2>(this HubConnection connection, Expression<Func<IHubPushMethods, Func<T1, T2, Task>>> boundMethod, Action<T1, T2> handler)
+            => connection.On<T1, T2>(_GetMethodName(boundMethod), handler);
+
+        public static IDisposable BindOnInterface<T1, T2, T3>(this HubConnection connection, Expression<Func<IHubPushMethods, Func<T1, T2, T3, Task>>> boundMethod, Action<T1, T2, T3> handler)
+            => connection.On<T1, T2, T3>(_GetMethodName(boundMethod), handler);
+
+        private static string _GetMethodName<T>(Expression<T> boundMethod)
+        {
+            var unaryExpression = (UnaryExpression)boundMethod.Body;
+            var methodCallExpression = (MethodCallExpression)unaryExpression.Operand;
+            var methodInfoExpression = (ConstantExpression)methodCallExpression.Object;
+            var methodInfo = (MethodInfo)methodInfoExpression.Value;
+            return methodInfo.Name;
+        }
+    }
+}
